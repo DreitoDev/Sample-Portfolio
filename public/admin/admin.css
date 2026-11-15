@@ -39,6 +39,7 @@ em { font-family: var(--serif); font-weight: 400; color: var(--muted); }
   font: inherit; font-size: .95rem; padding: .75rem .9rem; outline: none; transition: border-color .3s, box-shadow .3s;
 }
 .fld textarea { resize: vertical; min-height: 110px; }
+.fld input[type=date] { color-scheme: dark; }
 .fld select { appearance: none; background-image: linear-gradient(45deg, transparent 50%, #888 50%), linear-gradient(135deg, #888 50%, transparent 50%); background-position: calc(100% - 18px) 50%, calc(100% - 13px) 50%; background-size: 5px 5px; background-repeat: no-repeat; }
 .fld input:focus, .fld textarea:focus, .fld select:focus { border-color: var(--text); box-shadow: 0 0 0 4px rgba(255,255,255,.06); }
 .check { display: flex; align-items: center; gap: .75rem; cursor: pointer; margin-bottom: 1.1rem; font-size: .92rem; }

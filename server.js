@@ -103,6 +103,7 @@ const SETTINGS_FIELDS = [
   { name: 'full_name', label: 'Full name', type: 'text' },
   { name: 'first_name', label: 'First name (hero)', type: 'text' },
   { name: 'last_name', label: 'Last name (hero)', type: 'text' },
+  { name: 'birthdate', label: 'Date of birth (leave blank to hide)', type: 'date' },
   { name: 'roles', label: 'Roles (comma separated)', type: 'text' },
   { name: 'tagline', label: 'Tagline', type: 'textarea' },
   { name: 'about', label: 'About me (blank line = new paragraph)', type: 'textarea', rows: 8 },
@@ -300,6 +301,8 @@ let SESSION_SECRET = process.env.SESSION_SECRET || '';
 async function init() {
   await createSchema();
   await seed();
+  // settings added after launch: add a default once; never overwrites what was saved in the admin
+  await run("INSERT OR IGNORE INTO settings (key, value) VALUES ('birthdate', '2004-10-02')");
   if (!SESSION_SECRET) {
     const row = await get("SELECT value FROM meta WHERE key = 'session_secret'");
     SESSION_SECRET = row?.value || crypto.randomBytes(48).toString('hex');

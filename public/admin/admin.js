@@ -179,7 +179,7 @@
             <input type="hidden" name="${f.name}" value="${esc(v)}">
           </div></div>`;
       default:
-        return `<label class="fld"><span>${esc(f.label)}${f.required ? ' *' : ''}</span><input type="${f.type === 'number' ? 'number' : f.type === 'url' ? 'url' : 'text'}" name="${f.name}" value="${esc(v)}" ${f.min !== undefined ? `min="${f.min}"` : ''} ${f.max !== undefined ? `max="${f.max}"` : ''} ${f.required ? 'required' : ''} ${f.type === 'url' ? 'placeholder="https://"' : ''}></label>`;
+        return `<label class="fld"><span>${esc(f.label)}${f.required ? ' *' : ''}</span><input type="${['number', 'url', 'date'].includes(f.type) ? f.type : 'text'}" name="${f.name}" value="${esc(v)}" ${f.min !== undefined ? `min="${f.min}"` : ''} ${f.max !== undefined ? `max="${f.max}"` : ''} ${f.required ? 'required' : ''} ${f.type === 'url' ? 'placeholder="https://"' : ''}></label>`;
     }
   }
 

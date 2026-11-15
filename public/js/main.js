@@ -138,6 +138,7 @@
     const college = (d.education || []).find((e) => /present/i.test(e.end_year)) || (d.education || [])[0];
     const info = [
       ['Name', esc(name)],
+      s.birthdate && ['Date of birth', esc(formatDate(s.birthdate))],
       ['Based in', esc(s.location)],
       college && ['Studying', esc(college.course || college.level)],
       college && ['School', esc(college.school)],
@@ -239,6 +240,13 @@
       .join('');
 
     initInteractions();
+  }
+
+  // "2004-10-02" -> "October 2, 2004" (parsed as a local date so it never shifts by a day)
+  function formatDate(value) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value).trim());
+    if (!m) return value;
+    return new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
   }
 
   /* ---------------- Projects ---------------- */
