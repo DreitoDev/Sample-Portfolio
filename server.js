@@ -34,7 +34,7 @@ const TABLES = {
     list: ['name', 'category', 'level'],
     fields: [
       { name: 'name', label: 'Skill name', type: 'text', required: true },
-      { name: 'category', label: 'Category', type: 'select', options: ['Frontend', 'Backend', 'Database', 'Design', 'Tools', 'Office', 'IT Support'] },
+      { name: 'category', label: 'Category', type: 'select', options: ['Frontend', 'Backend', 'Database', 'Design', 'Tools', 'Productivity Tools', 'IT Support'] },
       { name: 'level', label: 'Proficiency (0–100)', type: 'number', min: 0, max: 100 },
       { name: 'sort_order', label: 'Display order', type: 'number' },
     ],
@@ -315,7 +315,7 @@ async function init() {
   // content added after launch: each runs once, so later edits/deletes in the admin are respected
   await runOnce('2026-11-add-office-and-it-support-skills', async () => {
     const added = [
-      ['Microsoft Word', 'Office', 90], ['Microsoft Excel', 'Office', 80], ['Microsoft PowerPoint', 'Office', 88],
+      ['Microsoft Word', 'Productivity Tools', 90], ['Microsoft Excel', 'Productivity Tools', 80], ['Microsoft PowerPoint', 'Productivity Tools', 88],
       ['Computer System Servicing', 'IT Support', 80], ['Hardware Troubleshooting', 'IT Support', 80],
       ['Software Troubleshooting', 'IT Support', 82],
     ];
@@ -328,6 +328,10 @@ async function init() {
         [name, category, level, order++, name]
       );
     }
+  });
+  // "Office" was unclear (could read as office work) — rename the category
+  await runOnce('2026-11-rename-office-to-productivity-tools', async () => {
+    await run("UPDATE skills SET category = 'Productivity Tools' WHERE category = 'Office'");
   });
   if (!SESSION_SECRET) {
     const row = await get("SELECT value FROM meta WHERE key = 'session_secret'");
