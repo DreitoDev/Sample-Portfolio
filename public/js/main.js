@@ -182,7 +182,7 @@
     /* skills */
     const groups = {};
     (d.skills || []).forEach((k) => (groups[k.category || 'Other'] ||= []).push(k));
-    const order = ['Frontend', 'Design', 'Backend', 'Database', 'Tools'];
+    const order = ['Frontend', 'Design', 'Backend', 'Database', 'Tools', 'Office', 'IT Support'];
     const cats = Object.keys(groups).sort((a, b) => (order.indexOf(a) + 99) % 99 - (order.indexOf(b) + 99) % 99);
     $('#skillsGrid').innerHTML = cats
       .map(

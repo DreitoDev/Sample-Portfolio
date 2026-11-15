@@ -34,7 +34,7 @@ const TABLES = {
     list: ['name', 'category', 'level'],
     fields: [
       { name: 'name', label: 'Skill name', type: 'text', required: true },
-      { name: 'category', label: 'Category', type: 'select', options: ['Frontend', 'Backend', 'Database', 'Design', 'Tools'] },
+      { name: 'category', label: 'Category', type: 'select', options: ['Frontend', 'Backend', 'Database', 'Design', 'Tools', 'Office', 'IT Support'] },
       { name: 'level', label: 'Proficiency (0–100)', type: 'number', min: 0, max: 100 },
       { name: 'sort_order', label: 'Display order', type: 'number' },
     ],
@@ -297,12 +297,38 @@ async function seed() {
   });
 }
 
+// Runs a one-time content update and remembers it in the meta table.
+async function runOnce(key, fn) {
+  const done = await get('SELECT value FROM meta WHERE key = ?', ['migration:' + key]);
+  if (done) return;
+  await fn();
+  await run('INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)', ['migration:' + key, new Date().toISOString()]);
+}
+
 let SESSION_SECRET = process.env.SESSION_SECRET || '';
 async function init() {
   await createSchema();
   await seed();
   // settings added after launch: add a default once; never overwrites what was saved in the admin
   await run("INSERT OR IGNORE INTO settings (key, value) VALUES ('birthdate', '2004-10-02')");
+
+  // content added after launch: each runs once, so later edits/deletes in the admin are respected
+  await runOnce('2026-11-add-office-and-it-support-skills', async () => {
+    const added = [
+      ['Microsoft Word', 'Office', 90], ['Microsoft Excel', 'Office', 80], ['Microsoft PowerPoint', 'Office', 88],
+      ['Computer System Servicing', 'IT Support', 80], ['Hardware Troubleshooting', 'IT Support', 80],
+      ['Software Troubleshooting', 'IT Support', 82],
+    ];
+    let order = ((await get('SELECT MAX(sort_order) AS m FROM skills')).m || 0) + 1;
+    for (const [name, category, level] of added) {
+      // single statement, so two servers starting at once can't add the same skill twice
+      await run(
+        `INSERT INTO skills (name, category, level, sort_order)
+         SELECT ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM skills WHERE lower(name) = lower(?))`,
+        [name, category, level, order++, name]
+      );
+    }
+  });
   if (!SESSION_SECRET) {
     const row = await get("SELECT value FROM meta WHERE key = 'session_secret'");
     SESSION_SECRET = row?.value || crypto.randomBytes(48).toString('hex');
