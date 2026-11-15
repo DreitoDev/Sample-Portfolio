@@ -121,14 +121,31 @@ const SETTINGS_FIELDS = [
 /* ------------------------------------------------------------------ */
 /*  Database (libSQL: local file or Turso)                             */
 /* ------------------------------------------------------------------ */
-const DB_URL =
-  process.env.TURSO_DATABASE_URL ||
-  process.env.LIBSQL_URL ||
-  (IS_VERCEL ? 'file:/tmp/portfolio.db' : 'file:' + path.relative(process.cwd(), path.join(DATA_DIR, 'portfolio.db')).replace(/\\/g, '/'));
-if (IS_VERCEL && DB_URL.startsWith('file:')) {
-  console.warn('⚠ No TURSO_DATABASE_URL set — using a temporary database. Changes will NOT be saved. Connect Turso in Vercel → Storage.');
+// Find the Turso connection no matter what prefix the Vercel integration used
+// (e.g. TURSO_DATABASE_URL, STORAGE_URL, MYDB_URL ...).
+function findTurso() {
+  const env = process.env;
+  const keys = Object.keys(env);
+  const urlKey =
+    ['TURSO_DATABASE_URL', 'LIBSQL_URL'].find((k) => env[k]) ||
+    keys.find((k) => /^(libsql|wss?|https?):\/\/.*turso\.io/i.test(env[k] || '')) ||
+    keys.find((k) => /^libsql:\/\//i.test(env[k] || ''));
+  if (!urlKey) return null;
+  const prefix = urlKey.replace(/(_DATABASE)?_URL$/i, '');
+  const tokenKey =
+    ['TURSO_AUTH_TOKEN', 'LIBSQL_AUTH_TOKEN'].find((k) => env[k]) ||
+    keys.find((k) => k.startsWith(prefix) && /TOKEN$/i.test(k) && !/READ_WRITE/i.test(k)) ||
+    keys.find((k) => /TURSO.*TOKEN$/i.test(k));
+  return { url: env[urlKey], authToken: tokenKey ? env[tokenKey] : undefined };
 }
-const db = createClient({ url: DB_URL, authToken: process.env.TURSO_AUTH_TOKEN || process.env.LIBSQL_AUTH_TOKEN });
+const turso = findTurso();
+const DB_URL =
+  turso?.url ||
+  (IS_VERCEL ? 'file:/tmp/portfolio.db' : 'file:' + path.relative(process.cwd(), path.join(DATA_DIR, 'portfolio.db')).replace(/\\/g, '/'));
+if (IS_VERCEL && !turso) {
+  console.warn('⚠ No Turso database found — using a temporary database. Changes will NOT be saved. Connect Turso in Vercel → Storage.');
+}
+const db = createClient({ url: DB_URL, authToken: turso?.authToken });
 
 const toObjects = (rs) =>
   rs.rows.map((r) => Object.fromEntries(rs.columns.map((c, i) => [c, typeof r[i] === 'bigint' ? Number(r[i]) : r[i]])));
@@ -513,9 +530,10 @@ app.post('/api/admin/upload', requireAuth, upload.single('file'), async (req, re
   const ext = path.extname(req.file.originalname).toLowerCase();
   const name = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}${ext}`;
 
-  if (process.env.BLOB_READ_WRITE_TOKEN) {
+  const blobKey = process.env.BLOB_READ_WRITE_TOKEN ? 'BLOB_READ_WRITE_TOKEN' : Object.keys(process.env).find((k) => /READ_WRITE_TOKEN$/.test(k));
+  if (blobKey) {
     const { put } = require('@vercel/blob');
-    const blob = await put(`uploads/${name}`, req.file.buffer, { access: 'public', contentType: ALLOWED[ext] });
+    const blob = await put(`uploads/${name}`, req.file.buffer, { access: 'public', contentType: ALLOWED[ext], token: process.env[blobKey] });
     return res.json({ url: blob.url });
   }
   if (IS_VERCEL) {
