@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="robots" content="noindex" />
+  <title>Admin — Portfolio</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%23000'/><text x='50' y='66' font-family='Arial' font-weight='700' font-size='46' text-anchor='middle' fill='%23fff'>AG</text></svg>" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/admin/admin.css" />
+</head>
+<body>
+  <!-- LOGIN -->
+  <section class="login" id="loginView" hidden>
+    <form class="login__card" id="loginForm">
+      <div class="login__logo">AG<span>.</span></div>
+      <h1>Welcome back, <em>Andrei</em></h1>
+      <p class="muted">Sign in to manage your portfolio.</p>
+      <label class="fld"><span>Username</span><input name="username" autocomplete="username" required /></label>
+      <label class="fld"><span>Password</span><input name="password" type="password" autocomplete="current-password" required /></label>
+      <button class="btn btn--primary btn--full" type="submit">Sign in</button>
+      <p class="err" id="loginError"></p>
+      <a class="muted small back" href="/">← Back to portfolio</a>
+    </form>
+  </section>
+
+  <!-- APP -->
+  <div class="app" id="appView" hidden>
+    <aside class="side" id="side">
+      <div class="side__logo">AG<span>.</span> <small>Admin</small></div>
+      <nav class="side__nav" id="sideNav"></nav>
+      <div class="side__foot">
+        <a href="/" target="_blank" class="side__link">↗ View portfolio</a>
+        <button class="side__link" id="logoutBtn">⎋ Log out</button>
+      </div>
+    </aside>
+    <main class="main">
+      <header class="top">
+        <button class="top__menu" id="menuBtn" aria-label="Menu">☰</button>
+        <div>
+          <h1 id="pageTitle">Dashboard</h1>
+          <p class="muted small" id="pageSub"></p>
+        </div>
+        <div class="top__actions" id="topActions"></div>
+      </header>
+      <div class="content" id="content"></div>
+    </main>
+  </div>
+
+  <!-- Editor drawer -->
+  <div class="drawer" id="drawer" aria-hidden="true">
+    <div class="drawer__backdrop" data-close></div>
+    <form class="drawer__panel" id="drawerForm">
+      <header class="drawer__head">
+        <h2 id="drawerTitle">Edit</h2>
+        <button type="button" class="icon-btn" data-close aria-label="Close">✕</button>
+      </header>
+      <div class="drawer__body" id="drawerBody"></div>
+      <footer class="drawer__foot">
+        <button type="button" class="btn btn--ghost" data-close>Cancel</button>
+        <button type="submit" class="btn btn--primary">Save</button>
+      </footer>
+    </form>
+  </div>
+
+  <div class="toast" id="toast"></div>
+  <script src="/admin/admin.js"></script>
+</body>
+</html>
