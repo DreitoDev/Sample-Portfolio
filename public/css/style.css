@@ -478,6 +478,26 @@ em { font-family: var(--serif); font-style: italic; font-weight: 400; }
 .field textarea:focus + span, .field textarea:not(:placeholder-shown) + span { top: 0; font-size: 0.75rem; letter-spacing: 0.05em; }
 .field.error input, .field.error textarea { border-color: #f87171; }
 .hp { position: absolute; left: -9999px; opacity: 0; }
+
+/* email verification step */
+.form--verify .form__row, .form--verify > .field { display: none; }
+.verify { text-align: center; animation: verifyIn 0.7s var(--ease) both; }
+.verify[hidden] { display: none; }
+@keyframes verifyIn { from { opacity: 0; transform: translateY(16px); } }
+.verify__icon {
+  width: 56px; height: 56px; margin: 0 auto 1rem; border-radius: 50%; display: grid; place-items: center;
+  font-size: 1.4rem; border: 1px solid var(--line-2); background: var(--surface);
+}
+.verify__title { font-size: 1.35rem; font-weight: 600; letter-spacing: -0.02em; }
+.verify__text { color: var(--muted); font-size: 0.92rem; margin: 0.5rem auto 1.5rem; max-width: 26rem; }
+.verify__text b { color: var(--text); font-weight: 500; word-break: break-all; }
+.field--code { max-width: 15rem; margin: 0 auto 1rem; }
+.field--code input { text-align: center; font-size: 1.6rem; letter-spacing: 0.5em; font-variant-numeric: tabular-nums; padding-left: 0.5em; }
+.field--code span { left: 50%; transform: translateX(-50%); white-space: nowrap; }
+.verify__links { display: flex; justify-content: center; gap: 1.5rem; margin-bottom: 1.5rem; font-size: 0.85rem; }
+.verify__links button { color: var(--muted); border-bottom: 1px solid var(--line-2); padding-bottom: 2px; transition: color 0.3s, border-color 0.3s; }
+.verify__links button:hover { color: var(--text); border-color: var(--text); }
+.verify__links button:disabled { opacity: 0.4; pointer-events: none; }
 .form__status { margin-top: 1rem; font-size: 0.9rem; min-height: 1.4em; text-align: center; }
 .form__status.ok { color: #4ade80; }
 .form__status.err { color: #f87171; }

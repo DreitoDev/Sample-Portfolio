@@ -204,6 +204,14 @@ async function createSchema() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       created_at TEXT DEFAULT (datetime('now','localtime'))
     );
+    CREATE TABLE IF NOT EXISTS pending_messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      token TEXT UNIQUE NOT NULL,
+      code_hash TEXT NOT NULL,
+      name TEXT NOT NULL, email TEXT NOT NULL, subject TEXT, message TEXT NOT NULL,
+      attempts INTEGER DEFAULT 0,
+      expires_at INTEGER NOT NULL
+    );
   `);
   for (const [table, def] of Object.entries(TABLES)) {
     await run(`CREATE TABLE IF NOT EXISTS ${table} (id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -440,6 +448,43 @@ async function checkEmailDomain(email) {
 }
 const NO_MAIL_MSG = "This email address doesn't seem to exist (its domain can't receive email). Please use a real email so I can reply.";
 
+/* ---------- Email sending (Gmail) for verification codes ---------- */
+// Set GMAIL_USER + GMAIL_APP_PASSWORD to turn on email verification for the contact form.
+// Without them the form still works, but saves messages without verifying the email.
+const MAIL_USER = process.env.GMAIL_USER;
+const MAIL_PASS = (process.env.GMAIL_APP_PASSWORD || '').replace(/\s/g, '');
+let mailer = null;
+if (MAIL_USER && MAIL_PASS) {
+  mailer = require('nodemailer').createTransport({ service: 'gmail', auth: { user: MAIL_USER, pass: MAIL_PASS } });
+} else if (process.env.MAIL_TEST === '1') {
+  // local testing only: "send" emails by printing them to the console
+  mailer = require('nodemailer').createTransport({ jsonTransport: true });
+  mailer.testMode = true;
+}
+const CODE_TTL = 10 * 60_000; // codes expire after 10 minutes
+const hashCode = (token, code) => crypto.createHash('sha256').update(`${token}:${code}:${SESSION_SECRET}`).digest('hex');
+const escapeHtml = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+async function sendMail(to, subject, text, html) {
+  const info = await mailer.sendMail({ from: `"Andrei R. Gandia" <${MAIL_USER || 'test@localhost'}>`, to, subject, text, html });
+  if (mailer.testMode) console.log(`[MAIL_TEST] to=${to} subject="${subject}"\n${text}\n`);
+  return info;
+}
+
+async function saveMessage({ name, email, subject, message }) {
+  await run('INSERT INTO messages (name, email, subject, message) VALUES (?, ?, ?, ?)', [name, email, subject, message]);
+  // let Andrei know (best effort — never fail the visitor's request if this fails).
+  // Awaited because Vercel may freeze the function right after the response is sent.
+  if (mailer && MAIL_USER) {
+    await sendMail(
+      MAIL_USER,
+      `New portfolio message from ${name}`,
+      `From: ${name} <${email}>\nSubject: ${subject || '(none)'}\n\n${message}\n\nReply directly to: ${email}`,
+      `<p><b>From:</b> ${escapeHtml(name)} &lt;${escapeHtml(email)}&gt;<br><b>Subject:</b> ${escapeHtml(subject || '(none)')}</p><p style="white-space:pre-wrap">${escapeHtml(message)}</p>`
+    ).catch((err) => console.error('Owner notification failed:', err.message));
+  }
+}
+
 app.post('/api/contact', rateLimit(5, 10 * 60_000), async (req, res) => {
   const { name = '', email = '', subject = '', message = '', website = '' } = req.body || {};
   if (website) return res.json({ ok: true }); // honeypot for bots
@@ -449,9 +494,61 @@ app.post('/api/contact', rateLimit(5, 10 * 60_000), async (req, res) => {
   if (m.length > 5000) return res.status(400).json({ error: 'Message is too long.' });
   const emailProblem = await checkEmailDomain(e);
   if (emailProblem) return res.status(400).json({ error: emailProblem, field: 'email' });
-  await run('INSERT INTO messages (name, email, subject, message) VALUES (?, ?, ?, ?)', [
-    n.slice(0, 120), e.slice(0, 200), String(subject).trim().slice(0, 200), m,
-  ]);
+  const msg = { name: n.slice(0, 120), email: e.slice(0, 200), subject: String(subject).trim().slice(0, 200), message: m };
+
+  if (!mailer) {
+    await saveMessage(msg);
+    return res.json({ ok: true });
+  }
+
+  // Email verification: send a 6-digit code; the message is only saved once the code is entered.
+  await run('DELETE FROM pending_messages WHERE expires_at < ?', [Date.now()]);
+  const token = crypto.randomBytes(24).toString('hex');
+  const code = String(crypto.randomInt(0, 1_000_000)).padStart(6, '0');
+  await run(
+    'INSERT INTO pending_messages (token, code_hash, name, email, subject, message, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    [token, hashCode(token, code), msg.name, msg.email, msg.subject, msg.message, Date.now() + CODE_TTL]
+  );
+  try {
+    // Only the code goes into this email (no visitor-written text), so the form can't be used to spam others.
+    await sendMail(
+      msg.email,
+      `Your verification code: ${code}`,
+      `Your verification code is ${code}\n\nEnter it on Andrei Gandia's portfolio to send your message. It expires in 10 minutes.\nIf you didn't request this, you can ignore this email.`,
+      `<div style="font-family:Arial,sans-serif;max-width:420px;margin:auto;padding:24px;border:1px solid #eee;border-radius:12px">
+        <p style="margin:0 0 8px;color:#555">Your verification code</p>
+        <p style="font-size:34px;letter-spacing:8px;font-weight:700;margin:0 0 16px;color:#000">${code}</p>
+        <p style="color:#555;font-size:14px;margin:0">Enter this code on Andrei Gandia's portfolio to send your message. It expires in 10 minutes.<br>If you didn't request this, you can ignore this email.</p>
+      </div>`
+    );
+  } catch (err) {
+    console.error('Verification email failed:', err.message);
+    await run('DELETE FROM pending_messages WHERE token = ?', [token]);
+    return res.status(502).json({ error: "We couldn't send a code to that email. Please check the address and try again.", field: 'email' });
+  }
+  res.json({ verify: true, token, email: msg.email });
+});
+
+app.post('/api/contact/verify', rateLimit(20, 10 * 60_000), async (req, res) => {
+  const token = String(req.body?.token || '');
+  const code = String(req.body?.code || '').replace(/\D/g, '');
+  const p = await get('SELECT * FROM pending_messages WHERE token = ?', [token]);
+  if (!p || p.expires_at < Date.now()) {
+    if (p) await run('DELETE FROM pending_messages WHERE id = ?', [p.id]);
+    return res.status(400).json({ error: 'This code has expired. Please click "Resend code".', expired: true });
+  }
+  if (p.attempts >= 5) {
+    await run('DELETE FROM pending_messages WHERE id = ?', [p.id]);
+    return res.status(400).json({ error: 'Too many wrong attempts. Please click "Resend code".', expired: true });
+  }
+  const expected = Buffer.from(p.code_hash);
+  const given = Buffer.from(hashCode(token, code));
+  if (code.length !== 6 || !crypto.timingSafeEqual(expected, given)) {
+    await run('UPDATE pending_messages SET attempts = attempts + 1 WHERE id = ?', [p.id]);
+    return res.status(400).json({ error: `Wrong code. ${Math.max(0, 4 - p.attempts)} tries left.`, field: 'code' });
+  }
+  await run('DELETE FROM pending_messages WHERE id = ?', [p.id]);
+  await saveMessage({ name: p.name, email: p.email, subject: p.subject, message: p.message });
   res.json({ ok: true });
 });
 

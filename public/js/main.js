@@ -482,8 +482,36 @@
 
   /* ---------------- Contact form ---------------- */
   const form = $('#contactForm'), status = $('#formStatus');
-  form.addEventListener('submit', async (e) => {
-    e.preventDefault();
+  const submitBtn = form.querySelector('button[type=submit]');
+  const verifyBox = $('#verifyBox');
+  let pendingToken = null; // set while waiting for the visitor to enter their email code
+
+  const setStatus = (cls, text) => { status.className = 'form__status ' + cls; status.textContent = text; };
+  const setButton = (text, busy = false) => { submitBtn.disabled = busy; submitBtn.querySelector('span').textContent = text; };
+  const markField = (name) => {
+    const el = form.elements[name];
+    if (!el) return;
+    el.closest('.field').classList.add('error');
+    el.focus();
+  };
+
+  function showVerifyStep(email) {
+    form.classList.add('form--verify');
+    verifyBox.hidden = false;
+    $('#verifyEmail').textContent = email;
+    form.elements.code.value = '';
+    setButton('Verify & send');
+    setTimeout(() => form.elements.code.focus(), 100);
+  }
+  function showFormStep() {
+    pendingToken = null;
+    form.classList.remove('form--verify');
+    verifyBox.hidden = true;
+    setButton('Send message');
+  }
+
+  // Step 1: send the message details -> server either saves it, or emails a code
+  async function sendDetails() {
     const data = Object.fromEntries(new FormData(form));
     let bad = false;
     ['name', 'email', 'message'].forEach((k) => {
@@ -492,30 +520,64 @@
       field.classList.toggle('error', invalid);
       bad ||= invalid;
     });
-    if (bad) { status.className = 'form__status err'; status.textContent = 'Please fill in your name, a valid email, and a message.'; return; }
-    const btn = form.querySelector('button');
-    btn.disabled = true; btn.querySelector('span').textContent = 'Sending…';
+    if (bad) return setStatus('err', 'Please fill in your name, a valid email, and a message.');
+    setButton('Sending…', true);
     try {
       const res = await fetch('/api/contact', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
       const out = await res.json();
-      if (!res.ok) {
-        if (out.field && form.elements[out.field]) {
-          form.elements[out.field].closest('.field').classList.add('error');
-          form.elements[out.field].focus();
-        }
-        throw new Error(out.error || 'Something went wrong.');
+      if (!res.ok) { if (out.field) { showFormStep(); markField(out.field); } throw new Error(out.error || 'Something went wrong.'); }
+      if (out.verify) {
+        pendingToken = out.token;
+        showVerifyStep(out.email);
+        setStatus('ok', 'Code sent! Check your email.');
+        return;
       }
-      form.reset();
-      status.className = 'form__status ok';
-      status.textContent = "Thank you! Your message has been sent — I'll get back to you soon.";
-      toast('Message sent ✓');
+      done();
     } catch (err) {
-      status.className = 'form__status err';
-      status.textContent = err.message;
-    } finally {
-      btn.disabled = false; btn.querySelector('span').textContent = 'Send message';
+      setStatus('err', err.message);
+      setButton(pendingToken ? 'Verify & send' : 'Send message');
     }
+  }
+
+  // Step 2: check the code the visitor received
+  async function sendCode() {
+    const code = form.elements.code.value.replace(/\D/g, '');
+    if (code.length !== 6) { markField('code'); return setStatus('err', 'Please enter the 6-digit code from your email.'); }
+    setButton('Verifying…', true);
+    try {
+      const res = await fetch('/api/contact/verify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: pendingToken, code }) });
+      const out = await res.json();
+      if (!res.ok) { if (out.field) markField(out.field); throw new Error(out.error || 'Something went wrong.'); }
+      done();
+    } catch (err) {
+      setStatus('err', err.message);
+      setButton('Verify & send');
+    }
+  }
+
+  function done() {
+    form.reset();
+    showFormStep();
+    setStatus('ok', "Thank you! Your message has been sent — I'll get back to you soon.");
+    toast('Message sent ✓');
+  }
+
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    pendingToken ? sendCode() : sendDetails();
   });
+  $('#resendCode').addEventListener('click', async (e) => {
+    e.target.disabled = true;
+    pendingToken = null;
+    await sendDetails();
+    setTimeout(() => (e.target.disabled = false), 15000); // avoid hammering the resend button
+  });
+  $('#changeEmail').addEventListener('click', () => {
+    showFormStep();
+    setStatus('', '');
+    form.elements.email.focus();
+  });
+  form.elements.code.addEventListener('input', (e) => (e.target.value = e.target.value.replace(/\D/g, '').slice(0, 6)));
   form.addEventListener('input', (e) => e.target.closest('.field')?.classList.remove('error'));
 
   function toast(msg) {

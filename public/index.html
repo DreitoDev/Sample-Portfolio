@@ -190,6 +190,16 @@
             <label class="field"><input name="subject" placeholder=" " maxlength="200" /><span>Subject</span></label>
             <label class="field"><textarea name="message" rows="5" required placeholder=" " maxlength="5000"></textarea><span>Your message</span></label>
             <input type="text" name="website" class="hp" tabindex="-1" autocomplete="off" />
+            <div class="verify" id="verifyBox" hidden>
+              <div class="verify__icon">✉</div>
+              <p class="verify__title">Check your inbox</p>
+              <p class="verify__text">I sent a 6-digit code to <b id="verifyEmail"></b>. Enter it below to send your message. Check your spam folder if you don't see it.</p>
+              <label class="field field--code"><input name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder=" " /><span>Verification code</span></label>
+              <div class="verify__links">
+                <button type="button" id="resendCode">Resend code</button>
+                <button type="button" id="changeEmail">← Change email</button>
+              </div>
+            </div>
             <button class="btn btn--light btn--full" type="submit" data-magnetic><span>Send message</span><i>→</i></button>
             <p class="form__status" id="formStatus" role="status"></p>
           </form>
