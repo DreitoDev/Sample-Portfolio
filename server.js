@@ -1,22 +1,28 @@
 /**
  * Andrei R. Gandia — Dynamic Portfolio
- * Node.js + Express + SQLite (built-in node:sqlite)
+ * Node.js + Express + SQLite/libSQL
+ *
+ *  Local:   database = data/portfolio.db, uploads = public/uploads
+ *  Vercel:  database = Turso (TURSO_DATABASE_URL + TURSO_AUTH_TOKEN),
+ *           uploads  = Vercel Blob (BLOB_READ_WRITE_TOKEN)
  */
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const express = require('express');
-const session = require('express-session');
 const bcrypt = require('bcryptjs');
 const multer = require('multer');
-const { DatabaseSync } = require('node:sqlite');
+const { createClient } = require('@libsql/client');
 
 const PORT = process.env.PORT || 3000;
+const IS_VERCEL = !!process.env.VERCEL;
 const ROOT = __dirname;
 const DATA_DIR = path.join(ROOT, 'data');
 const UPLOAD_DIR = path.join(ROOT, 'public', 'uploads');
-fs.mkdirSync(DATA_DIR, { recursive: true });
-fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+if (!IS_VERCEL) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+}
 
 /* ------------------------------------------------------------------ */
 /*  Content schema — drives the DB tables AND the admin forms          */
@@ -113,58 +119,24 @@ const SETTINGS_FIELDS = [
 ];
 
 /* ------------------------------------------------------------------ */
-/*  Database                                                           */
+/*  Database (libSQL: local file or Turso)                             */
 /* ------------------------------------------------------------------ */
-const db = new DatabaseSync(path.join(DATA_DIR, 'portfolio.db'));
-db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
-  CREATE TABLE IF NOT EXISTS admins (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT UNIQUE NOT NULL,
-    password_hash TEXT NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL, email TEXT NOT NULL, subject TEXT, message TEXT NOT NULL,
-    is_read INTEGER DEFAULT 0,
-    created_at TEXT DEFAULT (datetime('now','localtime'))
-  );
-  CREATE TABLE IF NOT EXISTS page_views (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    created_at TEXT DEFAULT (datetime('now','localtime'))
-  );
-`);
-
-for (const [table, def] of Object.entries(TABLES)) {
-  const cols = def.fields
-    .map((f) => `${f.name} ${['number', 'checkbox'].includes(f.type) ? 'INTEGER DEFAULT 0' : 'TEXT'}`)
-    .join(', ');
-  db.exec(`CREATE TABLE IF NOT EXISTS ${table} (id INTEGER PRIMARY KEY AUTOINCREMENT, ${cols},
-           created_at TEXT DEFAULT (datetime('now','localtime')))`);
-  // add any columns added to the schema later
-  const existing = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
-  for (const f of def.fields) {
-    if (!existing.includes(f.name)) {
-      db.exec(`ALTER TABLE ${table} ADD COLUMN ${f.name} ${['number', 'checkbox'].includes(f.type) ? 'INTEGER DEFAULT 0' : 'TEXT'}`);
-    }
-  }
+const DB_URL =
+  process.env.TURSO_DATABASE_URL ||
+  process.env.LIBSQL_URL ||
+  (IS_VERCEL ? 'file:/tmp/portfolio.db' : 'file:' + path.relative(process.cwd(), path.join(DATA_DIR, 'portfolio.db')).replace(/\\/g, '/'));
+if (IS_VERCEL && DB_URL.startsWith('file:')) {
+  console.warn('⚠ No TURSO_DATABASE_URL set — using a temporary database. Changes will NOT be saved. Connect Turso in Vercel → Storage.');
 }
+const db = createClient({ url: DB_URL, authToken: process.env.TURSO_AUTH_TOKEN || process.env.LIBSQL_AUTH_TOKEN });
 
-const getSettings = () =>
-  Object.fromEntries(db.prepare('SELECT key, value FROM settings').all().map((r) => [r.key, r.value]));
-const setSetting = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
+const toObjects = (rs) =>
+  rs.rows.map((r) => Object.fromEntries(rs.columns.map((c, i) => [c, typeof r[i] === 'bigint' ? Number(r[i]) : r[i]])));
+const all = async (sql, args = []) => toObjects(await db.execute({ sql, args }));
+const get = async (sql, args = []) => (await all(sql, args))[0];
+const run = (sql, args = []) => db.execute({ sql, args });
 
-function insertRow(table, data) {
-  const fields = TABLES[table].fields;
-  const names = fields.map((f) => f.name);
-  const values = fields.map((f) => normalize(f, data[f.name]));
-  const res = db
-    .prepare(`INSERT INTO ${table} (${names.join(',')}) VALUES (${names.map(() => '?').join(',')})`)
-    .run(...values);
-  return Number(res.lastInsertRowid);
-}
+const colType = (f) => (['number', 'checkbox'].includes(f.type) ? 'INTEGER DEFAULT 0' : 'TEXT');
 
 function normalize(field, value) {
   if (field.type === 'checkbox') return value === true || value === 1 || value === '1' || value === 'on' || value === 'true' ? 1 : 0;
@@ -179,12 +151,63 @@ function normalize(field, value) {
   return String(value).trim().slice(0, 10000);
 }
 
-/* ---------- Seed (first run only) ---------- */
-function seed() {
-  if (db.prepare('SELECT COUNT(*) AS c FROM admins').get().c === 0) {
-    db.prepare('INSERT INTO admins (username, password_hash) VALUES (?, ?)').run('Andrei0950', bcrypt.hashSync('admin123', 10));
+async function getSettings() {
+  const rows = await all('SELECT key, value FROM settings');
+  return Object.fromEntries(rows.map((r) => [r.key, r.value]));
+}
+const setSetting = (k, v) =>
+  run('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', [k, v]);
+
+async function insertRow(table, data) {
+  const fields = TABLES[table].fields;
+  const names = fields.map((f) => f.name);
+  const res = await run(
+    `INSERT INTO ${table} (${names.join(',')}) VALUES (${names.map(() => '?').join(',')})`,
+    fields.map((f) => normalize(f, data[f.name]))
+  );
+  return Number(res.lastInsertRowid);
+}
+
+async function createSchema() {
+  await db.executeMultiple(`
+    CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
+    CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+    CREATE TABLE IF NOT EXISTS admins (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL, email TEXT NOT NULL, subject TEXT, message TEXT NOT NULL,
+      is_read INTEGER DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now','localtime'))
+    );
+    CREATE TABLE IF NOT EXISTS page_views (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      created_at TEXT DEFAULT (datetime('now','localtime'))
+    );
+  `);
+  for (const [table, def] of Object.entries(TABLES)) {
+    await run(`CREATE TABLE IF NOT EXISTS ${table} (id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ${def.fields.map((f) => `${f.name} ${colType(f)}`).join(', ')},
+      created_at TEXT DEFAULT (datetime('now','localtime')))`);
+    const existing = (await all(`PRAGMA table_info(${table})`)).map((c) => c.name);
+    for (const f of def.fields) {
+      if (!existing.includes(f.name)) await run(`ALTER TABLE ${table} ADD COLUMN ${f.name} ${colType(f)}`);
+    }
   }
-  if (db.prepare('SELECT COUNT(*) AS c FROM settings').get().c > 0) return;
+}
+
+/* ---------- Seed (first run only) ---------- */
+async function seed() {
+  if ((await get('SELECT COUNT(*) AS c FROM admins')).c === 0) {
+    await run('INSERT INTO admins (username, password_hash) VALUES (?, ?)', [
+      process.env.ADMIN_USERNAME || 'Andrei0950',
+      bcrypt.hashSync(process.env.ADMIN_PASSWORD || 'admin123', 10),
+    ]);
+  }
+  if ((await get('SELECT COUNT(*) AS c FROM settings')).c > 0) return;
 
   const s = {
     full_name: 'Andrei R. Gandia',
@@ -194,7 +217,7 @@ function seed() {
     tagline: 'I design and build clean, minimal, and user-friendly web experiences — where every pixel has a purpose.',
     about:
       "I'm Andrei, a Bachelor of Science in Information Technology student at Camarines Sur Polytechnic Colleges, based in Polangui, Albay. I love turning ideas into clean, responsive, and intuitive interfaces that look good and feel effortless to use.\n\n" +
-      'My strength is front-end development and UI/UX design — I care about the details: spacing, typography, motion, and how every interaction feels. I\'m also steadily growing my back-end skills with PHP, Node.js, and MySQL so I can bring complete ideas to life, from the design all the way to the database.\n\n' +
+      "My strength is front-end development and UI/UX design — I care about the details: spacing, typography, motion, and how every interaction feels. I'm also steadily growing my back-end skills with PHP, Node.js, and MySQL so I can bring complete ideas to life, from the design all the way to the database.\n\n" +
       "Right now I'm focused on learning, building real projects, and finding opportunities where I can grow as a developer and contribute to a team.",
     location: 'Polangui, Albay, Philippines',
     email: 'gandiaandrei5@gmail.com',
@@ -207,7 +230,7 @@ function seed() {
     cv_file: '',
     available: '1',
   };
-  for (const [k, v] of Object.entries(s)) setSetting.run(k, v);
+  for (const [k, v] of Object.entries(s)) await setSetting(k, v);
 
   const skills = [
     ['HTML5', 'Frontend', 95], ['CSS3', 'Frontend', 92], ['JavaScript', 'Frontend', 82],
@@ -218,7 +241,9 @@ function seed() {
     ['MySQL', 'Database', 65],
     ['Git & GitHub', 'Tools', 70], ['VS Code', 'Tools', 90],
   ];
-  skills.forEach(([name, category, level], i) => insertRow('skills', { name, category, level, sort_order: i + 1 }));
+  for (const [i, [name, category, level]] of skills.entries()) {
+    await insertRow('skills', { name, category, level, sort_order: i + 1 });
+  }
 
   const edu = [
     ['College', 'Camarines Sur Polytechnic Colleges', 'Bachelor of Science in Information Technology', '2023', 'Present',
@@ -227,42 +252,84 @@ function seed() {
     ['Junior High School', 'Polangui General Comprehensive High School', '', '2016', '2020', ''],
     ['Elementary', 'Polangui North Elementary School', '', '2010', '2016', ''],
   ];
-  edu.forEach(([level, school, course, start_year, end_year, description], i) =>
-    insertRow('education', { level, school, course, start_year, end_year, description, sort_order: i + 1 }));
+  for (const [i, [level, school, course, start_year, end_year, description]] of edu.entries()) {
+    await insertRow('education', { level, school, course, start_year, end_year, description, sort_order: i + 1 });
+  }
 
-  insertRow('projects', {
+  await insertRow('projects', {
     title: 'Personal Portfolio',
     category: 'Web App',
     description:
       'A dynamic, minimalist portfolio with smooth animations and a full admin dashboard. All content — skills, projects, education, and messages — is stored in a database and managed without touching code.',
     tech: 'HTML, CSS, JavaScript, Node.js, Express, SQLite',
-    image: '',
-    github_url: '',
+    image: '/uploads/project-portfolio.jpg',
+    github_url: 'https://github.com/DreitoDev/Sample-Portfolio',
     live_url: '',
     year: '2026',
     featured: 1,
     sort_order: 1,
   });
 }
-seed();
+
+let SESSION_SECRET = process.env.SESSION_SECRET || '';
+async function init() {
+  await createSchema();
+  await seed();
+  if (!SESSION_SECRET) {
+    const row = await get("SELECT value FROM meta WHERE key = 'session_secret'");
+    SESSION_SECRET = row?.value || crypto.randomBytes(48).toString('hex');
+    if (!row) await run("INSERT OR IGNORE INTO meta (key, value) VALUES ('session_secret', ?)", [SESSION_SECRET]);
+    SESSION_SECRET = (await get("SELECT value FROM meta WHERE key = 'session_secret'")).value;
+  }
+}
+const ready = init();
+ready.catch((err) => console.error('Database init failed:', err));
+
+/* ------------------------------------------------------------------ */
+/*  Auth — signed, stateless cookie (works on serverless)              */
+/* ------------------------------------------------------------------ */
+const COOKIE = 'ag_admin';
+const MAX_AGE = 1000 * 60 * 60 * 8;
+// signing key includes the password hash, so changing the password logs out other sessions
+const sign = (value, pwHash) => crypto.createHmac('sha256', SESSION_SECRET + pwHash).update(value).digest('base64url');
+
+function setAuthCookie(req, res, admin) {
+  const value = `${admin.id}.${Date.now() + MAX_AGE}`;
+  res.cookie(COOKIE, `${value}.${sign(value, admin.password_hash)}`, {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: IS_VERCEL || req.secure,
+    maxAge: MAX_AGE,
+    path: '/',
+  });
+}
+
+async function currentAdmin(req) {
+  const raw = (req.headers.cookie || '').split(';').map((s) => s.trim()).find((s) => s.startsWith(COOKIE + '='));
+  if (!raw) return null;
+  const [id, exp, sig] = decodeURIComponent(raw.slice(COOKIE.length + 1)).split('.');
+  if (!id || !exp || !sig || Date.now() > Number(exp)) return null;
+  const admin = await get('SELECT id, username, password_hash FROM admins WHERE id = ?', [Number(id)]);
+  if (!admin) return null;
+  const expected = sign(`${id}.${exp}`, admin.password_hash);
+  if (sig.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
+  return admin;
+}
+
+const requireAuth = async (req, res, next) => {
+  const admin = await currentAdmin(req);
+  if (!admin) return res.status(401).json({ error: 'Unauthorized' });
+  req.admin = admin;
+  next();
+};
 
 /* ------------------------------------------------------------------ */
 /*  App                                                                */
 /* ------------------------------------------------------------------ */
 const app = express();
 app.disable('x-powered-by');
+app.set('trust proxy', 1);
 app.use(express.json({ limit: '1mb' }));
-
-const secretFile = path.join(DATA_DIR, '.session-secret');
-if (!fs.existsSync(secretFile)) fs.writeFileSync(secretFile, crypto.randomBytes(48).toString('hex'));
-app.use(
-  session({
-    secret: fs.readFileSync(secretFile, 'utf8'),
-    resave: false,
-    saveUninitialized: false,
-    cookie: { httpOnly: true, sameSite: 'lax', maxAge: 1000 * 60 * 60 * 8 },
-  })
-);
 
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -271,7 +338,13 @@ app.use((req, res, next) => {
   next();
 });
 
+// On Vercel, files in /public are served by the CDN; locally Express serves them.
 app.use(express.static(path.join(ROOT, 'public'), { extensions: ['html'] }));
+
+// make sure the database is ready before any API call
+app.use('/api', async (req, res, next) => {
+  try { await ready; next(); } catch (err) { next(err); }
+});
 
 /* ---------- simple in-memory rate limiter ---------- */
 function rateLimit(max, windowMs) {
@@ -288,59 +361,53 @@ function rateLimit(max, windowMs) {
 }
 
 /* ---------- Public API ---------- */
-app.get('/api/portfolio', (req, res) => {
-  const settings = getSettings();
-  const data = { settings };
+app.get('/api/portfolio', async (req, res) => {
+  const data = { settings: await getSettings() };
   for (const [table, def] of Object.entries(TABLES)) {
-    data[table] = db.prepare(`SELECT * FROM ${table} ORDER BY ${def.order}`).all();
+    data[table] = await all(`SELECT * FROM ${table} ORDER BY ${def.order}`);
   }
   res.json(data);
 });
 
-app.post('/api/view', rateLimit(30, 60_000), (req, res) => {
-  db.prepare('INSERT INTO page_views DEFAULT VALUES').run();
+app.post('/api/view', rateLimit(30, 60_000), async (req, res) => {
+  await run('INSERT INTO page_views DEFAULT VALUES');
   res.json({ ok: true });
 });
 
-app.post('/api/contact', rateLimit(5, 10 * 60_000), (req, res) => {
+app.post('/api/contact', rateLimit(5, 10 * 60_000), async (req, res) => {
   const { name = '', email = '', subject = '', message = '', website = '' } = req.body || {};
   if (website) return res.json({ ok: true }); // honeypot for bots
   const n = String(name).trim(), e = String(email).trim(), m = String(message).trim();
   if (!n || !e || !m) return res.status(400).json({ error: 'Please fill in your name, email, and message.' });
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) return res.status(400).json({ error: 'Please enter a valid email address.' });
   if (m.length > 5000) return res.status(400).json({ error: 'Message is too long.' });
-  db.prepare('INSERT INTO messages (name, email, subject, message) VALUES (?, ?, ?, ?)')
-    .run(n.slice(0, 120), e.slice(0, 200), String(subject).trim().slice(0, 200), m);
+  await run('INSERT INTO messages (name, email, subject, message) VALUES (?, ?, ?, ?)', [
+    n.slice(0, 120), e.slice(0, 200), String(subject).trim().slice(0, 200), m,
+  ]);
   res.json({ ok: true });
 });
 
 /* ---------- Auth ---------- */
-const requireAuth = (req, res, next) => (req.session.adminId ? next() : res.status(401).json({ error: 'Unauthorized' }));
-
-app.post('/api/auth/login', rateLimit(10, 15 * 60_000), (req, res) => {
+app.post('/api/auth/login', rateLimit(10, 15 * 60_000), async (req, res) => {
   const { username = '', password = '' } = req.body || {};
-  const admin = db.prepare('SELECT * FROM admins WHERE username = ?').get(String(username));
+  const admin = await get('SELECT * FROM admins WHERE username = ?', [String(username)]);
   if (!admin || !bcrypt.compareSync(String(password), admin.password_hash)) {
     return res.status(401).json({ error: 'Invalid username or password.' });
   }
-  req.session.regenerate((err) => {
-    if (err) return res.status(500).json({ error: 'Session error' });
-    req.session.adminId = admin.id;
-    res.json({ ok: true, username: admin.username });
-  });
+  setAuthCookie(req, res, admin);
+  res.json({ ok: true, username: admin.username });
 });
 
-app.post('/api/auth/logout', (req, res) => req.session.destroy(() => res.json({ ok: true })));
-
-app.get('/api/auth/me', (req, res) => {
-  if (!req.session.adminId) return res.status(401).json({ error: 'Unauthorized' });
-  const admin = db.prepare('SELECT id, username FROM admins WHERE id = ?').get(req.session.adminId);
-  res.json(admin || {});
+app.post('/api/auth/logout', (req, res) => {
+  res.clearCookie(COOKIE, { path: '/' });
+  res.json({ ok: true });
 });
 
-app.put('/api/auth/account', requireAuth, (req, res) => {
+app.get('/api/auth/me', requireAuth, (req, res) => res.json({ id: req.admin.id, username: req.admin.username }));
+
+app.put('/api/auth/account', requireAuth, async (req, res) => {
   const { current_password = '', new_username = '', new_password = '' } = req.body || {};
-  const admin = db.prepare('SELECT * FROM admins WHERE id = ?').get(req.session.adminId);
+  const admin = req.admin;
   if (!bcrypt.compareSync(String(current_password), admin.password_hash)) {
     return res.status(400).json({ error: 'Current password is incorrect.' });
   }
@@ -350,116 +417,128 @@ app.put('/api/auth/account', requireAuth, (req, res) => {
   }
   const hash = new_password ? bcrypt.hashSync(String(new_password), 10) : admin.password_hash;
   try {
-    db.prepare('UPDATE admins SET username = ?, password_hash = ? WHERE id = ?').run(uname, hash, admin.id);
+    await run('UPDATE admins SET username = ?, password_hash = ? WHERE id = ?', [uname, hash, admin.id]);
   } catch {
     return res.status(400).json({ error: 'Username already taken.' });
   }
+  setAuthCookie(req, res, { ...admin, password_hash: hash }); // keep this session logged in
   res.json({ ok: true, username: uname });
 });
 
 /* ---------- Admin API ---------- */
 app.get('/api/admin/schema', requireAuth, (req, res) => res.json({ tables: TABLES, settings: SETTINGS_FIELDS }));
 
-app.get('/api/admin/stats', requireAuth, (req, res) => {
-  const count = (t, where = '') => db.prepare(`SELECT COUNT(*) AS c FROM ${t} ${where}`).get().c;
+app.get('/api/admin/stats', requireAuth, async (req, res) => {
+  const count = async (t, where = '') => (await get(`SELECT COUNT(*) AS c FROM ${t} ${where}`)).c;
   res.json({
-    projects: count('projects'),
-    skills: count('skills'),
-    education: count('education'),
-    experience: count('experience'),
-    certificates: count('certificates'),
-    messages: count('messages'),
-    unread: count('messages', 'WHERE is_read = 0'),
-    views: count('page_views'),
-    views_today: count('page_views', "WHERE date(created_at) = date('now','localtime')"),
-    recent_messages: db.prepare('SELECT id, name, subject, created_at, is_read FROM messages ORDER BY id DESC LIMIT 5').all(),
+    projects: await count('projects'),
+    skills: await count('skills'),
+    education: await count('education'),
+    experience: await count('experience'),
+    certificates: await count('certificates'),
+    messages: await count('messages'),
+    unread: await count('messages', 'WHERE is_read = 0'),
+    views: await count('page_views'),
+    views_today: await count('page_views', "WHERE date(created_at) = date('now','localtime')"),
+    recent_messages: await all('SELECT id, name, subject, created_at, is_read FROM messages ORDER BY id DESC LIMIT 5'),
   });
 });
 
-app.get('/api/admin/settings', requireAuth, (req, res) => res.json(getSettings()));
-app.put('/api/admin/settings', requireAuth, (req, res) => {
+app.get('/api/admin/settings', requireAuth, async (req, res) => res.json(await getSettings()));
+app.put('/api/admin/settings', requireAuth, async (req, res) => {
   const body = req.body || {};
   for (const f of SETTINGS_FIELDS) {
-    if (f.name in body) setSetting.run(f.name, String(normalize(f, body[f.name])));
+    if (f.name in body) await setSetting(f.name, String(normalize(f, body[f.name])));
   }
-  res.json(getSettings());
+  res.json(await getSettings());
 });
 
 const validTable = (req, res, next) => (TABLES[req.params.table] ? next() : res.status(404).json({ error: 'Unknown section' }));
 
-app.get('/api/admin/content/:table', requireAuth, validTable, (req, res) => {
+app.get('/api/admin/content/:table', requireAuth, validTable, async (req, res) => {
   const { table } = req.params;
-  res.json(db.prepare(`SELECT * FROM ${table} ORDER BY ${TABLES[table].order}`).all());
+  res.json(await all(`SELECT * FROM ${table} ORDER BY ${TABLES[table].order}`));
 });
 
-app.post('/api/admin/content/:table', requireAuth, validTable, (req, res) => {
+app.post('/api/admin/content/:table', requireAuth, validTable, async (req, res) => {
   const { table } = req.params;
-  const def = TABLES[table];
-  for (const f of def.fields) {
+  for (const f of TABLES[table].fields) {
     if (f.required && !String(req.body?.[f.name] ?? '').trim()) return res.status(400).json({ error: `${f.label} is required.` });
   }
-  const id = insertRow(table, req.body || {});
-  res.json(db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(id));
+  const id = await insertRow(table, req.body || {});
+  res.json(await get(`SELECT * FROM ${table} WHERE id = ?`, [id]));
 });
 
-app.put('/api/admin/content/:table/:id', requireAuth, validTable, (req, res) => {
+app.put('/api/admin/content/:table/:id', requireAuth, validTable, async (req, res) => {
   const { table, id } = req.params;
-  const def = TABLES[table];
   const body = req.body || {};
-  const fields = def.fields.filter((f) => f.name in body);
+  const fields = TABLES[table].fields.filter((f) => f.name in body);
   if (!fields.length) return res.status(400).json({ error: 'Nothing to update.' });
   for (const f of fields) {
     if (f.required && !String(body[f.name] ?? '').trim()) return res.status(400).json({ error: `${f.label} is required.` });
   }
-  db.prepare(`UPDATE ${table} SET ${fields.map((f) => `${f.name} = ?`).join(', ')} WHERE id = ?`)
-    .run(...fields.map((f) => normalize(f, body[f.name])), Number(id));
-  res.json(db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(Number(id)));
+  await run(
+    `UPDATE ${table} SET ${fields.map((f) => `${f.name} = ?`).join(', ')} WHERE id = ?`,
+    [...fields.map((f) => normalize(f, body[f.name])), Number(id)]
+  );
+  res.json(await get(`SELECT * FROM ${table} WHERE id = ?`, [Number(id)]));
 });
 
-app.delete('/api/admin/content/:table/:id', requireAuth, validTable, (req, res) => {
-  db.prepare(`DELETE FROM ${req.params.table} WHERE id = ?`).run(Number(req.params.id));
+app.delete('/api/admin/content/:table/:id', requireAuth, validTable, async (req, res) => {
+  await run(`DELETE FROM ${req.params.table} WHERE id = ?`, [Number(req.params.id)]);
   res.json({ ok: true });
 });
 
 /* ---------- Messages ---------- */
-app.get('/api/admin/messages', requireAuth, (req, res) =>
-  res.json(db.prepare('SELECT * FROM messages ORDER BY id DESC').all()));
-app.put('/api/admin/messages/:id', requireAuth, (req, res) => {
-  db.prepare('UPDATE messages SET is_read = ? WHERE id = ?').run(req.body?.is_read ? 1 : 0, Number(req.params.id));
+app.get('/api/admin/messages', requireAuth, async (req, res) => res.json(await all('SELECT * FROM messages ORDER BY id DESC')));
+app.put('/api/admin/messages/:id', requireAuth, async (req, res) => {
+  await run('UPDATE messages SET is_read = ? WHERE id = ?', [req.body?.is_read ? 1 : 0, Number(req.params.id)]);
   res.json({ ok: true });
 });
-app.delete('/api/admin/messages/:id', requireAuth, (req, res) => {
-  db.prepare('DELETE FROM messages WHERE id = ?').run(Number(req.params.id));
+app.delete('/api/admin/messages/:id', requireAuth, async (req, res) => {
+  await run('DELETE FROM messages WHERE id = ?', [Number(req.params.id)]);
   res.json({ ok: true });
 });
 
-/* ---------- Uploads ---------- */
-const ALLOWED = { '.png': 1, '.jpg': 1, '.jpeg': 1, '.webp': 1, '.gif': 1, '.svg': 0, '.pdf': 1 };
+/* ---------- Uploads (local disk, or Vercel Blob when deployed) ---------- */
+const ALLOWED = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.gif': 'image/gif', '.pdf': 'application/pdf' };
 const upload = multer({
-  storage: multer.diskStorage({
-    destination: UPLOAD_DIR,
-    filename: (req, file, cb) => {
-      const ext = path.extname(file.originalname).toLowerCase();
-      cb(null, `${Date.now()}-${crypto.randomBytes(4).toString('hex')}${ext}`);
-    },
-  }),
-  limits: { fileSize: 8 * 1024 * 1024 },
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 4 * 1024 * 1024 }, // Vercel functions accept up to ~4.5MB per request
   fileFilter: (req, file, cb) => cb(null, !!ALLOWED[path.extname(file.originalname).toLowerCase()]),
 });
 
-app.post('/api/admin/upload', requireAuth, upload.single('file'), (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'Only PNG, JPG, WEBP, GIF, or PDF files (max 8MB) are allowed.' });
-  res.json({ url: `/uploads/${req.file.filename}` });
+app.post('/api/admin/upload', requireAuth, upload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'Only PNG, JPG, WEBP, GIF, or PDF files (max 4MB) are allowed.' });
+  const ext = path.extname(req.file.originalname).toLowerCase();
+  const name = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}${ext}`;
+
+  if (process.env.BLOB_READ_WRITE_TOKEN) {
+    const { put } = require('@vercel/blob');
+    const blob = await put(`uploads/${name}`, req.file.buffer, { access: 'public', contentType: ALLOWED[ext] });
+    return res.json({ url: blob.url });
+  }
+  if (IS_VERCEL) {
+    return res.status(500).json({ error: 'Uploads need Vercel Blob. In Vercel, open your project → Storage → create a Blob store, then redeploy.' });
+  }
+  fs.writeFileSync(path.join(UPLOAD_DIR, name), req.file.buffer);
+  res.json({ url: `/uploads/${name}` });
 });
 
 /* ---------- Errors ---------- */
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 app.use((err, req, res, next) => {
   console.error(err);
-  res.status(err.status || 500).json({ error: err.code === 'LIMIT_FILE_SIZE' ? 'File too large (max 8MB).' : 'Server error' });
+  res.status(err.status || 500).json({ error: err.code === 'LIMIT_FILE_SIZE' ? 'File too large (max 4MB).' : 'Server error' });
 });
 
-app.listen(PORT, () => {
-  console.log(`\n  ✦ Portfolio running →  http://localhost:${PORT}`);
-  console.log(`  ✦ Admin dashboard   →  http://localhost:${PORT}/admin\n`);
-});
+module.exports = app;
+
+if (require.main === module) {
+  ready.then(() => {
+    app.listen(PORT, () => {
+      console.log(`\n  ✦ Portfolio running →  http://localhost:${PORT}`);
+      console.log(`  ✦ Admin dashboard   →  http://localhost:${PORT}/admin\n`);
+    });
+  });
+}

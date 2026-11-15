@@ -76,6 +76,9 @@ CREATE TABLE certificates (id INTEGER PRIMARY KEY AUTOINCREMENT,
   sort_order INTEGER DEFAULT 0,
   created_at TEXT DEFAULT (datetime('now','localtime')));
 
+CREATE TABLE meta (key TEXT PRIMARY KEY,
+  value TEXT);
+
 -- ---------- settings ----------
 INSERT INTO settings (key, value) VALUES ('full_name', 'Andrei R. Gandia');
 INSERT INTO settings (key, value) VALUES ('first_name', 'Andrei');

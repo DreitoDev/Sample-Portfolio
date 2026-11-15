@@ -25,6 +25,21 @@ public/admin/        → Admin dashboard
 public/uploads/      → Mga in-upload na larawan at CV
 ```
 
+## I-deploy sa Vercel
+
+1. Sa Vercel, i-import ang repository na ito (**Add New → Project**). Hindi na kailangang baguhin ang settings dahil naka-set na ang lahat sa `vercel.json`.
+2. Sa project, pumunta sa **Storage**:
+   - **Turso** (Create Database): dito mapupunta ang database. Kusa itong naglalagay ng `TURSO_DATABASE_URL` at `TURSO_AUTH_TOKEN`.
+   - **Blob** (Create Store): dito mapupunta ang mga in-upload na larawan at CV. Kusa itong naglalagay ng `BLOB_READ_WRITE_TOKEN`.
+3. Sa **Settings → Environment Variables**, idagdag ang:
+   - `ADMIN_PASSWORD`: ang password mo sa admin sa live site
+   - `SESSION_SECRET`: kahit anong mahabang random na text (optional)
+4. Sa **Deployments**, i-click ang **Redeploy**.
+
+Sa unang bukas, kusang malalagyan ng default content ang Turso database. Pagkatapos noon, sa `/admin` mo na ito i-e-edit.
+
+> Sa PC mo, ang `data/portfolio.db` pa rin ang gamit, kaya magkahiwalay ang data sa local at sa live site.
+
 ## Database
 
 Gumagamit ito ng **SQLite**, ang database na naka-save bilang iisang file.
