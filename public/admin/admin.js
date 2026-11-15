@@ -95,7 +95,12 @@
     const g = e.target.closest('[data-go]');
     if (g) { go(g.dataset.go); $('#side').classList.remove('open'); }
   });
-  $('#menuBtn').addEventListener('click', () => $('#side').classList.toggle('open'));
+  $('#menuBtn').addEventListener('click', (e) => { e.stopPropagation(); $('#side').classList.toggle('open'); });
+  // tap outside the sidebar (on the dark overlay) to close it on phones
+  document.addEventListener('click', (e) => {
+    const side = $('#side');
+    if (side.classList.contains('open') && (!side.contains(e.target) || e.clientX > side.getBoundingClientRect().right)) side.classList.remove('open');
+  });
 
   function go(view) {
     if (!NAV.some(([k]) => k === view)) view = 'dashboard';
