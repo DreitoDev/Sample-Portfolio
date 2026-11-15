@@ -310,8 +310,21 @@ async function init() {
     SESSION_SECRET = (await get("SELECT value FROM meta WHERE key = 'session_secret'")).value;
   }
 }
-const ready = init();
-ready.catch((err) => console.error('Database init failed:', err));
+// Start connecting right away, but if it fails (e.g. a network blip to Turso on a cold start)
+// forget the failure so the next request tries again — otherwise one bad start would break
+// this server instance for every visitor until Vercel recycles it.
+let readyPromise = null;
+function ensureReady() {
+  if (!readyPromise) {
+    readyPromise = init().catch((err) => {
+      console.error('Database init failed (will retry on next request):', err);
+      readyPromise = null;
+      throw err;
+    });
+  }
+  return readyPromise;
+}
+ensureReady().catch(() => {});
 
 /* ------------------------------------------------------------------ */
 /*  Auth — signed, stateless cookie (works on serverless)              */
@@ -371,7 +384,10 @@ app.use(express.static(path.join(ROOT, 'public'), { extensions: ['html'] }));
 
 // make sure the database is ready before any API call
 app.use('/api', async (req, res, next) => {
-  try { await ready; next(); } catch (err) { next(err); }
+  try {
+    await ensureReady().catch(() => ensureReady()); // one immediate retry for transient failures
+    next();
+  } catch (err) { next(err); }
 });
 
 /* ---------- simple in-memory rate limiter ---------- */
@@ -389,11 +405,27 @@ function rateLimit(max, windowMs) {
 }
 
 /* ---------- Public API ---------- */
+async function loadPortfolio() {
+  const entries = Object.entries(TABLES);
+  // fetch every section at the same time instead of one after another
+  const [settings, ...rows] = await Promise.all([
+    getSettings(),
+    ...entries.map(([table, def]) => all(`SELECT * FROM ${table} ORDER BY ${def.order}`)),
+  ]);
+  const data = { settings };
+  entries.forEach(([table], i) => (data[table] = rows[i]));
+  return data;
+}
+
 app.get('/api/portfolio', async (req, res) => {
-  const data = { settings: await getSettings() };
-  for (const [table, def] of Object.entries(TABLES)) {
-    data[table] = await all(`SELECT * FROM ${table} ORDER BY ${def.order}`);
+  let data;
+  try {
+    data = await loadPortfolio();
+  } catch (err) {
+    console.error('Loading portfolio failed, retrying once:', err.message);
+    data = await loadPortfolio(); // a second failure goes to the error handler
   }
+  res.setHeader('Cache-Control', 'no-store');
   res.json(data);
 });
 
@@ -733,7 +765,7 @@ app.use((err, req, res, next) => {
 module.exports = app;
 
 if (require.main === module) {
-  ready.then(() => {
+  ensureReady().then(() => {
     app.listen(PORT, () => {
       console.log(`\n  ✦ Portfolio running →  http://localhost:${PORT}`);
       console.log(`  ✦ Admin dashboard   →  http://localhost:${PORT}/admin\n`);

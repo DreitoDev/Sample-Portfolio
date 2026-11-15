@@ -83,13 +83,34 @@
   });
 
   /* ---------------- Data ---------------- */
-  fetch('/api/portfolio')
-    .then((r) => r.json())
-    .then((data) => {
-      render(data);
-      preload.dataReady = true;
-    })
-    .catch(() => { preload.dataReady = true; preload.imgReady = true; });
+  // Load the content, retrying a few times if the server hiccups (e.g. a cold start).
+  // The last good copy is kept in the browser so a failed load never shows an empty page.
+  const CACHE_KEY = 'portfolio-data-v1';
+  const isValidData = (d) => d && d.settings && Object.keys(d.settings).length > 0 && Array.isArray(d.skills);
+  async function fetchPortfolio() {
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        const r = await fetch('/api/portfolio', { cache: 'no-store' });
+        const d = await r.json();
+        if (r.ok && isValidData(d)) return d;
+      } catch {}
+      await new Promise((res) => setTimeout(res, 600 * 2 ** attempt)); // 0.6s, 1.2s, 2.4s, 4.8s
+    }
+    return null;
+  }
+  (async () => {
+    let data = await fetchPortfolio();
+    if (data) {
+      try { localStorage.setItem(CACHE_KEY, JSON.stringify(data)); } catch {}
+    } else {
+      try { data = JSON.parse(localStorage.getItem(CACHE_KEY)); } catch {}
+      if (!isValidData(data)) data = null;
+    }
+    if (data) render(data);
+    else setTimeout(() => toast("Couldn't load the content. Please refresh the page."), 1500);
+    preload.dataReady = true;
+    if (!data) preload.imgReady = true;
+  })();
 
   fetch('/api/view', { method: 'POST' }).catch(() => {});
 
@@ -143,7 +164,7 @@
       college && ['Studying', esc(college.course || college.level)],
       college && ['School', esc(college.school)],
       s.email && ['Email', `<a href="mailto:${esc(s.email)}">${esc(s.email)}</a>`],
-      ['Status', s.available === '1' ? 'Open for opportunities' : 'Currently busy'],
+      s.available === '1' ? ['Status', 'Open for opportunities'] : s.available === '0' ? ['Status', 'Currently busy'] : null,
     ].filter(Boolean);
     $('#aboutInfo').innerHTML = info.map(([k, v], i) => `<div class="info-row" style="--i:${i}"><span>${k}</span><span>${v}</span></div>`).join('');
 
