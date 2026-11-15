@@ -531,23 +531,25 @@ app.post('/api/admin/upload', requireAuth, upload.single('file'), async (req, re
   const name = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}${ext}`;
 
   const blobKey = process.env.BLOB_READ_WRITE_TOKEN ? 'BLOB_READ_WRITE_TOKEN' : Object.keys(process.env).find((k) => /READ_WRITE_TOKEN$/.test(k));
-  if (blobKey) {
+  // On Vercel, always try Blob: with an explicit token if one exists, otherwise let
+  // @vercel/blob find its own credentials (newer stores connect without a token variable).
+  if (blobKey || IS_VERCEL) {
     const { put } = require('@vercel/blob');
     try {
-      const blob = await put(`uploads/${name}`, req.file.buffer, { access: 'public', contentType: ALLOWED[ext], token: process.env[blobKey] });
+      const opts = { access: 'public', contentType: ALLOWED[ext] };
+      if (blobKey) opts.token = process.env[blobKey];
+      const blob = await put(`uploads/${name}`, req.file.buffer, opts);
       return res.json({ url: blob.url });
     } catch (err) {
       console.error('Blob upload failed:', err);
-      const isPrivate = /private/i.test(err.message || '');
-      return res.status(500).json({
-        error: isPrivate
-          ? 'Your Vercel Blob store is set to Private. Create a new Blob store with Public access (Vercel → Storage), connect it, then redeploy.'
-          : 'Upload failed: ' + (err.message || 'unknown error'),
-      });
+      const msg = err.message || 'unknown error';
+      // names only (never values) of Blob-related variables, to help debugging
+      const seen = Object.keys(process.env).filter((k) => /BLOB/i.test(k)).join(', ') || 'none';
+      let error = `Upload failed: ${msg} (Blob variables found: ${seen})`;
+      if (/private/i.test(msg)) error = 'Your Vercel Blob store is set to Private. Create a new Blob store with Public access (Vercel → Storage), connect it, then redeploy.';
+      else if (seen === 'none' || /token/i.test(msg)) error = `Vercel Blob is not connected to this project. In Vercel → Storage → your Blob store → Projects, connect "sample-portfolio", then redeploy. (Blob variables found: ${seen})`;
+      return res.status(500).json({ error });
     }
-  }
-  if (IS_VERCEL) {
-    return res.status(500).json({ error: 'Uploads need Vercel Blob. In Vercel, open your project → Storage → create a Blob store, then redeploy.' });
   }
   fs.writeFileSync(path.join(UPLOAD_DIR, name), req.file.buffer);
   res.json({ url: `/uploads/${name}` });
