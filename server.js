@@ -485,6 +485,15 @@ async function saveMessage({ name, email, subject, message }) {
   }
 }
 
+// Public, harmless status: tells whether email verification is switched on (no secrets).
+app.get('/api/contact/status', (req, res) => {
+  res.json({
+    verification: !!mailer && !mailer.testMode,
+    gmailUserSet: !!MAIL_USER,
+    gmailPasswordSet: !!MAIL_PASS,
+  });
+});
+
 app.post('/api/contact', rateLimit(5, 10 * 60_000), async (req, res) => {
   const { name = '', email = '', subject = '', message = '', website = '' } = req.body || {};
   if (website) return res.json({ ok: true }); // honeypot for bots
