@@ -185,9 +185,9 @@
       const end = /present/i.test(b || '') ? '<span class="now"><span class="dot"></span>Present</span>' : esc(b);
       return [esc(a), end].filter(Boolean).join(' — ');
     };
-    $('#educationList').innerHTML = (d.education || [])
+    $('#educationList').innerHTML = '<div class="timeline__fill" aria-hidden="true"></div>' + (d.education || [])
       .map(
-        (e) => `<div class="tl-item reveal">
+        (e) => `<div class="tl-item reveal"><span class="tl-dot" aria-hidden="true"></span>
           <div class="tl-year">${yr(e.start_year, e.end_year)}</div>
           <div><div class="tl-level">${esc(e.level)}</div><div class="tl-title">${esc(e.school)}</div>
           ${e.course ? `<div class="tl-sub">${esc(e.course)}</div>` : ''}
@@ -196,9 +196,9 @@
       .join('');
     if ((d.experience || []).length) {
       $('#experienceCol').hidden = false;
-      $('#experienceList').innerHTML = d.experience
+      $('#experienceList').innerHTML = '<div class="timeline__fill" aria-hidden="true"></div>' + d.experience
         .map(
-          (e) => `<div class="tl-item reveal">
+          (e) => `<div class="tl-item reveal"><span class="tl-dot" aria-hidden="true"></span>
           <div class="tl-year">${yr(e.start_date, e.end_date)}</div>
           <div><div class="tl-level">${esc(e.type)}</div><div class="tl-title">${esc(e.role)}</div>
           <div class="tl-sub">${esc(e.organization)}</div>
@@ -387,6 +387,8 @@
 
     initMagnetic();
     initCursorTargets();
+    cacheScrollTargets();
+    queueScroll();
   }
 
   function countUp(el) {
@@ -401,47 +403,148 @@
     requestAnimationFrame(frame);
   }
 
-  // word-by-word lead reveal tied to scroll
-  function updateLead() {
-    const lead = $('#aboutLead');
-    if (!lead) return;
-    const words = lead.querySelectorAll('.w');
-    if (!words.length) return;
-    const r = lead.getBoundingClientRect();
-    const vh = innerHeight;
-    const p = Math.min(1, Math.max(0, (vh * 0.85 - r.top) / (r.height + vh * 0.35)));
-    const n = Math.round(p * words.length);
-    words.forEach((w, i) => w.classList.toggle('on', i < n));
+  const clamp = (v, a = 0, b = 1) => Math.min(b, Math.max(a, v));
+  const isSmallScreen = () => innerWidth <= 860;
+
+  /* ---------------- Smooth (momentum) scroll — desktop mouse only ---------------- */
+  const smoothScroll = (() => {
+    if (isTouch || reduced || !matchMedia('(pointer: fine)').matches) return null;
+    const html = document.documentElement;
+    html.style.scrollBehavior = 'auto'; // we animate ourselves; CSS smoothing would fight us
+    let target = scrollY, current = scrollY, running = false;
+    const maxY = () => html.scrollHeight - innerHeight;
+    function loop() {
+      current += (target - current) * 0.1; // 10% closer per frame = soft slow-down
+      if (Math.abs(target - current) < 0.5) { current = target; running = false; }
+      window.scrollTo(0, current);
+      if (running) requestAnimationFrame(loop);
+    }
+    function to(y) {
+      if (!running) current = scrollY;
+      target = clamp(y, 0, maxY());
+      if (!running) { running = true; requestAnimationFrame(loop); }
+    }
+    addEventListener('wheel', (e) => {
+      const b = document.body;
+      if (e.ctrlKey || b.classList.contains('is-loading') || b.classList.contains('menu-open') || b.style.overflow === 'hidden') return;
+      if (Math.abs(e.deltaX) > Math.abs(e.deltaY) || e.target.closest('.modal__panel, textarea')) return;
+      e.preventDefault();
+      const d = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaMode === 2 ? e.deltaY * innerHeight : e.deltaY;
+      to((running ? target : scrollY) + d);
+    }, { passive: false });
+    // when the scrollbar / keyboard moves the page, follow it instead of fighting it
+    addEventListener('scroll', () => { if (!running) target = current = scrollY; }, { passive: true });
+    return { to };
+  })();
+
+  // all in-page links (#about, back to top, ...) glide with the same easing
+  function scrollToHash(hash) {
+    const el = hash && hash !== '#' ? document.getElementById(hash.slice(1)) : null;
+    const y = el ? el.getBoundingClientRect().top + scrollY : 0;
+    if (smoothScroll) smoothScroll.to(y);
+    else window.scrollTo({ top: y, behavior: reduced ? 'auto' : 'smooth' });
+    history.replaceState(null, '', hash && hash !== '#' ? hash : '#home');
+  }
+  document.addEventListener('click', (e) => {
+    const a = e.target.closest('a[href^="#"]');
+    if (!a) return;
+    const hash = a.getAttribute('href');
+    if (hash !== '#' && !document.getElementById(hash.slice(1))) return;
+    e.preventDefault();
+    document.body.classList.remove('menu-open');
+    scrollToHash(hash);
+  });
+
+  /* ---------------- Scroll-driven effects ---------------- */
+  const nav = $('#nav'), progress = $('#scrollProgress'), toTop = $('#toTop');
+  const heroContent = $('.hero__content'), heroVisual = $('.hero__visual');
+  const sections = $$('main section[id]');
+  const navLinks = $$('[data-link], [data-side]');
+  let lead = { el: null, words: [] }, timelines = [], projectMedia = [], contactTitle = null;
+  const ringLen = 2 * Math.PI * 22; // circumference of the back-to-top ring
+
+  // things rendered from the database: look them up once after rendering
+  function cacheScrollTargets() {
+    lead = { el: $('#aboutLead'), words: $$('#aboutLead .w') };
+    timelines = $$('.timeline').filter((t) => t.querySelector('.tl-item')).map((t) => ({
+      el: t, fill: t.querySelector('.timeline__fill'), items: [...t.querySelectorAll('.tl-item')],
+    }));
+    projectMedia = $$('.project__media');
+    contactTitle = $('.contact__title');
   }
 
-  /* ---------------- Scroll: nav, progress, active link ---------------- */
-  const nav = $('#nav'), progress = $('#scrollProgress');
-  const heroContent = $('.hero__content'), heroVisual = $('.hero__visual');
   let lastY = 0;
   function onScroll() {
-    const y = scrollY;
+    const y = scrollY, vh = innerHeight;
+    const h = document.documentElement.scrollHeight - vh;
+    const pageP = h > 0 ? y / h : 0;
+
     nav.classList.toggle('scrolled', y > 40);
     nav.classList.toggle('hidden', y > lastY && y > 400 && !document.body.classList.contains('menu-open'));
     lastY = y;
-    const h = document.documentElement.scrollHeight - innerHeight;
-    progress.style.transform = `scaleX(${h > 0 ? y / h : 0})`;
-    updateLead();
-    // hero parallax: content drifts up & fades, photo moves slower
-    if (!reduced && document.body.classList.contains('loaded') && y < innerHeight * 1.2) {
-      heroContent.style.transform = `translateY(${y * 0.22}px)`;
-      heroContent.style.opacity = Math.max(0, 1 - y / (innerHeight * 0.75));
-      heroVisual.style.transform = `translateY(${y * 0.1}px)`;
+    progress.style.transform = `scaleX(${pageP})`;
+
+    // back-to-top button: ring fills with page progress
+    toTop.classList.toggle('show', y > vh * 0.8);
+    toTop.style.setProperty('--dash', ringLen * (1 - pageP));
+
+    // about: words light up one by one
+    if (lead.el && lead.words.length) {
+      const r = lead.el.getBoundingClientRect();
+      const n = Math.round(clamp((vh * 0.85 - r.top) / (r.height + vh * 0.35)) * lead.words.length);
+      lead.words.forEach((w, i) => w.classList.toggle('on', i < n));
     }
+
+    if (!reduced) {
+      // hero: content drifts up & fades, photo moves slower
+      if (document.body.classList.contains('loaded') && y < vh * 1.2) {
+        heroContent.style.transform = `translateY(${y * 0.22}px)`;
+        heroContent.style.opacity = Math.max(0, 1 - y / (vh * 0.75));
+        heroVisual.style.transform = `translateY(${y * 0.1}px)`;
+      }
+      // projects: image drifts inside its frame
+      const strength = isSmallScreen() ? 8 : 18;
+      projectMedia.forEach((m) => {
+        const r = m.getBoundingClientRect();
+        if (r.bottom < 0 || r.top > vh) return;
+        m.style.setProperty('--py', `${(((r.top + r.height / 2) - vh / 2) / vh) * -strength}px`);
+      });
+      // contact: big title grows into place
+      if (contactTitle) {
+        const r = contactTitle.getBoundingClientRect();
+        const q = clamp((vh - r.top) / (vh * 0.85));
+        contactTitle.style.setProperty('--grow', (0.86 + 0.14 * q).toFixed(4));
+      }
+    }
+
+    // journey: line fills and dots light up as you pass them
+    timelines.forEach((t) => {
+      const r = t.el.getBoundingClientRect();
+      const p = clamp((vh * 0.6 - r.top) / r.height);
+      t.fill.style.transform = `scaleY(${p})`;
+      t.items.forEach((it) => it.classList.toggle('passed', it.getBoundingClientRect().top + 40 < vh * 0.6));
+    });
+
+    // active section in the top nav and the side indicator
     let current = '';
-    $$('main section[id]').forEach((sec) => { if (sec.getBoundingClientRect().top < innerHeight * 0.4) current = sec.id; });
-    $$('[data-link]').forEach((a) => a.classList.toggle('active', a.getAttribute('href') === '#' + current));
+    for (const sec of sections) if (sec.getBoundingClientRect().top < vh * 0.4) current = sec.id;
+    navLinks.forEach((a) => a.classList.toggle('active', a.getAttribute('href') === '#' + current));
+    document.body.classList.toggle('past-hero', y > vh * 0.6);
   }
-  addEventListener('scroll', () => requestAnimationFrame(onScroll), { passive: true });
+
+  // run at most once per animation frame, however many scroll events arrive
+  let scrollQueued = false;
+  const queueScroll = () => {
+    if (scrollQueued) return;
+    scrollQueued = true;
+    requestAnimationFrame(() => { scrollQueued = false; onScroll(); });
+  };
+  addEventListener('scroll', queueScroll, { passive: true });
+  addEventListener('resize', queueScroll, { passive: true });
   onScroll();
 
   /* ---------------- Mobile menu ---------------- */
   $('#navToggle').addEventListener('click', () => document.body.classList.toggle('menu-open'));
-  $$('[data-menu-link]').forEach((a) => a.addEventListener('click', () => document.body.classList.remove('menu-open')));
 
   /* ---------------- Cursor ---------------- */
   const cursor = $('#cursor'), ring = $('#cursorRing'), label = $('#cursorLabel');
