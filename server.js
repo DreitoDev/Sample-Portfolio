@@ -391,13 +391,64 @@ app.post('/api/view', rateLimit(30, 60_000), async (req, res) => {
   res.json({ ok: true });
 });
 
+/* ---------- Email checks for the contact form ---------- */
+// Throwaway inbox services — messages from these can't be replied to meaningfully.
+const DISPOSABLE_DOMAINS = new Set([
+  'mailinator.com', 'guerrillamail.com', 'guerrillamail.net', 'guerrillamail.org', 'guerrillamail.biz', 'guerrillamailblock.com',
+  'sharklasers.com', 'grr.la', 'pokemail.net', 'spam4.me', '10minutemail.com', '10minutemail.net', '10minutemail.co.uk',
+  'tempmail.com', 'temp-mail.org', 'temp-mail.io', 'tempmail.net', 'tempmailo.com', 'tempmail.dev', 'tempr.email', 'tmpmail.org',
+  'tmpmail.net', 'tmail.ws', 'emltmp.com', 'yopmail.com', 'yopmail.net', 'yopmail.fr', 'trashmail.com', 'trashmail.de',
+  'getnada.com', 'nada.email', 'dispostable.com', 'maildrop.cc', 'throwawaymail.com', 'fakeinbox.com', 'mintemail.com',
+  'mohmal.com', 'emailondeck.com', 'minuteinbox.com', 'burnermail.io', 'mailnesia.com', 'mytemp.email', 'discard.email',
+  'mailcatch.com', 'inboxkitten.com', '1secmail.com', '1secmail.org', '1secmail.net', 'moakt.com', 'spamgourmet.com',
+  'getairmail.com', 'fakemail.net', 'mailpoof.com', 'tempinbox.com', 'emailfake.com', 'crazymailing.com', 'dropmail.me',
+]);
+// Common typos of popular providers -> the domain they probably meant
+const DOMAIN_TYPOS = {
+  'gmial.com': 'gmail.com', 'gmai.com': 'gmail.com', 'gamil.com': 'gmail.com', 'gnail.com': 'gmail.com', 'gmail.co': 'gmail.com',
+  'gmail.con': 'gmail.com', 'gmaill.com': 'gmail.com', 'gmali.com': 'gmail.com', 'gmal.com': 'gmail.com', 'gmail.cm': 'gmail.com',
+  'yaho.com': 'yahoo.com', 'yahoo.co': 'yahoo.com', 'yahooo.com': 'yahoo.com', 'yhoo.com': 'yahoo.com', 'yahoo.con': 'yahoo.com',
+  'hotmial.com': 'hotmail.com', 'hotmai.com': 'hotmail.com', 'hotmail.co': 'hotmail.com', 'hotmal.com': 'hotmail.com',
+  'outlok.com': 'outlook.com', 'outloo.com': 'outlook.com', 'outlook.co': 'outlook.com', 'iclod.com': 'icloud.com', 'icloud.co': 'icloud.com',
+};
+const mxCache = new Map(); // domain -> { ok, at }
+
+// Returns null if the address looks deliverable, or an error message for the visitor.
+async function checkEmailDomain(email) {
+  const domain = email.split('@').pop().toLowerCase();
+  if (DOMAIN_TYPOS[domain]) {
+    return `Did you mean ${email.split('@')[0]}@${DOMAIN_TYPOS[domain]}? Please check your email address.`;
+  }
+  if (DISPOSABLE_DOMAINS.has(domain)) {
+    return 'Temporary/disposable email addresses are not accepted. Please use your real email so I can reply.';
+  }
+  const cached = mxCache.get(domain);
+  if (cached && Date.now() - cached.at < 6 * 60 * 60_000) return cached.ok ? null : NO_MAIL_MSG;
+  try {
+    const records = await require('dns').promises.resolveMx(domain);
+    // a "null MX" (exchange ".") means the domain explicitly does not receive email
+    const ok = records.some((r) => r.exchange && r.exchange !== '.');
+    mxCache.set(domain, { ok, at: Date.now() });
+    return ok ? null : NO_MAIL_MSG;
+  } catch (err) {
+    if (['ENOTFOUND', 'ENODATA', 'ENONAME', 'NXDOMAIN'].includes(err.code)) {
+      mxCache.set(domain, { ok: false, at: Date.now() });
+      return NO_MAIL_MSG;
+    }
+    return null; // DNS hiccup (timeout etc.) — don't block real visitors
+  }
+}
+const NO_MAIL_MSG = "This email address doesn't seem to exist (its domain can't receive email). Please use a real email so I can reply.";
+
 app.post('/api/contact', rateLimit(5, 10 * 60_000), async (req, res) => {
   const { name = '', email = '', subject = '', message = '', website = '' } = req.body || {};
   if (website) return res.json({ ok: true }); // honeypot for bots
   const n = String(name).trim(), e = String(email).trim(), m = String(message).trim();
   if (!n || !e || !m) return res.status(400).json({ error: 'Please fill in your name, email, and message.' });
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) return res.status(400).json({ error: 'Please enter a valid email address.' });
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(e)) return res.status(400).json({ error: 'Please enter a valid email address.' });
   if (m.length > 5000) return res.status(400).json({ error: 'Message is too long.' });
+  const emailProblem = await checkEmailDomain(e);
+  if (emailProblem) return res.status(400).json({ error: emailProblem, field: 'email' });
   await run('INSERT INTO messages (name, email, subject, message) VALUES (?, ?, ?, ?)', [
     n.slice(0, 120), e.slice(0, 200), String(subject).trim().slice(0, 200), m,
   ]);

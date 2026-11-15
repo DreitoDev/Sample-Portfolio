@@ -498,7 +498,13 @@
     try {
       const res = await fetch('/api/contact', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
       const out = await res.json();
-      if (!res.ok) throw new Error(out.error || 'Something went wrong.');
+      if (!res.ok) {
+        if (out.field && form.elements[out.field]) {
+          form.elements[out.field].closest('.field').classList.add('error');
+          form.elements[out.field].focus();
+        }
+        throw new Error(out.error || 'Something went wrong.');
+      }
       form.reset();
       status.className = 'form__status ok';
       status.textContent = "Thank you! Your message has been sent — I'll get back to you soon.";
