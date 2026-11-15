@@ -533,7 +533,10 @@ app.post('/api/contact', rateLimit(5, 10 * 60_000), async (req, res) => {
   } catch (err) {
     console.error('Verification email failed:', err.message);
     await run('DELETE FROM pending_messages WHERE token = ?', [token]);
-    return res.status(502).json({ error: "We couldn't send a code to that email. Please check the address and try again.", field: 'email' });
+    const reason = /auth|login|535|534|credentials/i.test(`${err.code} ${err.message}`)
+      ? ' (email sender login failed — check GMAIL_USER / GMAIL_APP_PASSWORD in Vercel)'
+      : ` (${String(err.code || err.message || '').slice(0, 80)})`;
+    return res.status(502).json({ error: "We couldn't send a code to that email. Please check the address and try again." + reason, field: 'email' });
   }
   res.json({ verify: true, token, email: msg.email });
 });
@@ -716,7 +719,12 @@ app.post('/api/admin/upload', requireAuth, upload.single('file'), async (req, re
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 app.use((err, req, res, next) => {
   console.error(err);
-  res.status(err.status || 500).json({ error: err.code === 'LIMIT_FILE_SIZE' ? 'File too large (max 4MB).' : 'Server error' });
+  let error = err.code === 'LIMIT_FILE_SIZE' ? 'File too large (max 4MB).' : 'Server error';
+  // contact form: include a short reason so problems can be diagnosed from the page
+  if (req.path.startsWith('/api/contact') && error === 'Server error') {
+    error = `Server error: ${String(err.message || err.code || 'unknown').slice(0, 160)}`;
+  }
+  res.status(err.status || 500).json({ error });
 });
 
 module.exports = app;
