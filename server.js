@@ -533,8 +533,18 @@ app.post('/api/admin/upload', requireAuth, upload.single('file'), async (req, re
   const blobKey = process.env.BLOB_READ_WRITE_TOKEN ? 'BLOB_READ_WRITE_TOKEN' : Object.keys(process.env).find((k) => /READ_WRITE_TOKEN$/.test(k));
   if (blobKey) {
     const { put } = require('@vercel/blob');
-    const blob = await put(`uploads/${name}`, req.file.buffer, { access: 'public', contentType: ALLOWED[ext], token: process.env[blobKey] });
-    return res.json({ url: blob.url });
+    try {
+      const blob = await put(`uploads/${name}`, req.file.buffer, { access: 'public', contentType: ALLOWED[ext], token: process.env[blobKey] });
+      return res.json({ url: blob.url });
+    } catch (err) {
+      console.error('Blob upload failed:', err);
+      const isPrivate = /private/i.test(err.message || '');
+      return res.status(500).json({
+        error: isPrivate
+          ? 'Your Vercel Blob store is set to Private. Create a new Blob store with Public access (Vercel → Storage), connect it, then redeploy.'
+          : 'Upload failed: ' + (err.message || 'unknown error'),
+      });
+    }
   }
   if (IS_VERCEL) {
     return res.status(500).json({ error: 'Uploads need Vercel Blob. In Vercel, open your project → Storage → create a Blob store, then redeploy.' });
